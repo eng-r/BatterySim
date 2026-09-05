@@ -43,6 +43,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
       badge: report ? `${report.total_simulated_time_years}y` : undefined,
     },
     {
+      id: "motor",
+      label: "DC Motor Lab (150°C)",
+      icon: <Cpu className="w-5 h-5" />,
+      badge: "150°C",
+    },
+    {
       id: "cli",
       label: "Python CLI & Adaptor",
       icon: <Terminal className="w-5 h-5" />,

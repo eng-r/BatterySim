@@ -17,14 +17,17 @@ import {
 import { BatterySpecification, ElectricalLoadProfile, SimulationReport, SimulationStepResult } from "../types";
 import { generateSimulationPdf } from "../lib/pdfReport";
 import { SohDecayVisualizer } from "./SohDecayVisualizer";
+import { MotorSpinSimulator } from "./MotorSpinSimulator";
 
 interface ResultsViewProps {
   report: SimulationReport | null;
   onRerun: () => void;
   cutoffVoltageV: number;
   battery?: BatterySpecification;
+  setBattery?: (b: BatterySpecification) => void;
   load?: ElectricalLoadProfile;
   ambientTempC?: number;
+  setAmbientTempC?: (t: number) => void;
 }
 
 export const ResultsView: React.FC<ResultsViewProps> = ({
@@ -32,8 +35,10 @@ export const ResultsView: React.FC<ResultsViewProps> = ({
   onRerun,
   cutoffVoltageV,
   battery,
+  setBattery,
   load,
   ambientTempC = 25,
+  setAmbientTempC,
 }) => {
   const [activeChart, setActiveChart] = useState<"voltage" | "soc" | "passivation" | "energy">("voltage");
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
@@ -310,6 +315,17 @@ export const ResultsView: React.FC<ResultsViewProps> = ({
         battery={battery}
         cutoffVoltageV={cutoffVoltageV}
       />
+
+      {/* High-Torque DC Motor Trapezoidal Degradation Lab */}
+      {battery && (
+        <MotorSpinSimulator
+          battery={battery}
+          setBattery={setBattery}
+          ambientTempC={ambientTempC}
+          setAmbientTempC={setAmbientTempC}
+          cutoffVoltageV={cutoffVoltageV}
+        />
+      )}
 
       {/* Interactive Multi-Waveform Vector Chart Container */}
       <div className="bg-white rounded-2xl border border-slate-200/90 shadow-xs p-6 space-y-4">

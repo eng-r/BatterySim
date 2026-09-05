@@ -1,0 +1,44 @@
+{
+  "profile_id": "dc_motor_trapezoidal_actuation",
+  "name": "High-Torque DC Motor Actuator (Trapezoidal Waveform / 150°C)",
+  "is_periodic": true,
+  "repeat_count": -1,
+  "max_simulation_time_s": 315360000,
+  "segments": [
+    {
+      "segment_id": "m1_standby",
+      "name": "Motor Driver Standby / Quiescent",
+      "load_type": "CONSTANT_CURRENT",
+      "value": 2.0,
+      "duration_s": 60.0
+    },
+    {
+      "segment_id": "m2_accel",
+      "name": "Trapezoid Accel / Inrush Surge (1.2A Peak)",
+      "load_type": "CONSTANT_CURRENT",
+      "value": 1200.0,
+      "duration_s": 4.0
+    },
+    {
+      "segment_id": "m3_cruise",
+      "name": "Continuous High-Torque Rotation (Trapezoid Plateau)",
+      "load_type": "CONSTANT_CURRENT",
+      "value": 650.0,
+      "duration_s": 45.0
+    },
+    {
+      "segment_id": "m4_decel",
+      "name": "Controlled Deceleration / Dynamic Braking",
+      "load_type": "CONSTANT_CURRENT",
+      "value": 250.0,
+      "duration_s": 6.0
+    },
+    {
+      "segment_id": "m5_cool",
+      "name": "Post-Spin Thermal Dwell & Recovery",
+      "load_type": "CONSTANT_CURRENT",
+      "value": 5.0,
+      "duration_s": 15.0
+    }
+  ]
+}

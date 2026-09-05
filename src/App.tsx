@@ -6,6 +6,7 @@ import { LoadProfileView } from "./components/LoadProfileView";
 import { ResultsView } from "./components/ResultsView";
 import { CliStudioView } from "./components/CliStudioView";
 import { SensitivityView } from "./components/SensitivityView";
+import { MotorSpinSimulator } from "./components/MotorSpinSimulator";
 import {
   ActiveTab,
   BatterySpecification,
@@ -148,8 +149,36 @@ export default function App() {
                 onRerun={handleRunSimulation}
                 cutoffVoltageV={battery.cutoff_voltage_v}
                 battery={battery}
+                setBattery={(b) => {
+                  setBattery(b);
+                  const rep = runClientSimulation(b, load, ambientTempC);
+                  setReport(rep);
+                }}
                 load={load}
                 ambientTempC={ambientTempC}
+                setAmbientTempC={(t) => {
+                  setAmbientTempC(t);
+                  const rep = runClientSimulation(battery, load, t);
+                  setReport(rep);
+                }}
+              />
+            )}
+
+            {activeTab === "motor" && (
+              <MotorSpinSimulator
+                battery={battery}
+                setBattery={(b) => {
+                  setBattery(b);
+                  const rep = runClientSimulation(b, load, ambientTempC);
+                  setReport(rep);
+                }}
+                ambientTempC={ambientTempC}
+                setAmbientTempC={(t) => {
+                  setAmbientTempC(t);
+                  const rep = runClientSimulation(battery, load, t);
+                  setReport(rep);
+                }}
+                cutoffVoltageV={battery.cutoff_voltage_v}
               />
             )}
 

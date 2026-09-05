@@ -5,6 +5,7 @@ coverage/
 .DS_Store
 *.log
 .env*
+.env.*
 !.env.example
 
 # Python
@@ -18,8 +19,6 @@ venv/
 env/
 
 # Environment variables / secrets
-.env
-.env.*
 *.key
 *.pem
 

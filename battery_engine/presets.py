@@ -169,6 +169,32 @@ BATTERY_PRESETS: Dict[str, BatterySpecification] = {
         self_discharge_annual_pct=3.0,
         arrhenius_activation_energy_j_mol=58000.0,
     ),
+    "lisocl2_downhole_hitemp_150c": BatterySpecification(
+        id="lisocl2_downhole_hitemp_150c",
+        name="Tadiran TLH / Electrochem 150°C (Li-SOCl2 High-Temp D-Cell)",
+        chemistry=BatteryChemistry.LITHIUM_THIONYL_CHLORIDE,
+        nominal_voltage_v=3.65,
+        nominal_capacity_mah=13500.0,
+        reference_discharge_current_ma=50.0,
+        cutoff_voltage_v=2.0,
+        internal_resistance_ohm=0.18,  # Ultra-low impedance spiral construction for motor inrush
+        r1_polarization_ohm=0.12,
+        c1_polarization_f=5.0,
+        r2_diffusion_ohm=0.22,
+        c2_diffusion_f=35.0,
+        peukert_coefficient=1.04,
+        kibam_c_ratio=0.90,
+        kibam_k_rate=4.5e-4,
+        has_passivation=True,
+        initial_passivation_resistance_ohm=0.45,
+        max_passivation_resistance_ohm=3.0,
+        passivation_breakdown_rate=0.55,
+        passivation_regrowth_rate=0.00015,
+        reference_temperature_c=25.0,
+        temp_resistance_coeff_pct=-0.7,
+        self_discharge_annual_pct=2.2,
+        arrhenius_activation_energy_j_mol=49000.0,
+    ),
 }
 
 # Standard IoT Load Profiles
@@ -219,6 +245,20 @@ LOAD_PRESETS: Dict[str, ElectricalLoadProfile] = {
         max_simulation_time_s=604800.0, # 7 days
         segments=[
             LoadSegment("s1", "Continuous Strobe & Radio Pulse", LoadType.CONSTANT_CURRENT, value=45.0, duration_s=1.0),
+        ]
+    ),
+    "dc_motor_trapezoidal_actuation": ElectricalLoadProfile(
+        profile_id="dc_motor_trapezoidal_actuation",
+        name="High-Torque DC Motor Actuator (Trapezoidal Waveform / 150°C)",
+        is_periodic=True,
+        repeat_count=-1,
+        max_simulation_time_s=3.1536e8,
+        segments=[
+            LoadSegment("m1_standby", "Motor Driver Standby / Quiescent", LoadType.CONSTANT_CURRENT, value=2.0, duration_s=60.0),
+            LoadSegment("m2_accel", "Trapezoid Accel / Inrush Surge (1.2A Peak)", LoadType.CONSTANT_CURRENT, value=1200.0, duration_s=4.0),
+            LoadSegment("m3_cruise", "Continuous High-Torque Rotation (Trapezoid Plateau)", LoadType.CONSTANT_CURRENT, value=650.0, duration_s=45.0),
+            LoadSegment("m4_decel", "Controlled Deceleration / Dynamic Braking", LoadType.CONSTANT_CURRENT, value=250.0, duration_s=6.0),
+            LoadSegment("m5_cool", "Post-Spin Thermal Dwell & Recovery", LoadType.CONSTANT_CURRENT, value=5.0, duration_s=15.0),
         ]
     ),
 }

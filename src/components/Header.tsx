@@ -88,13 +88,20 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
 
         {/* Temperature Badge / Selector */}
-        <div className="flex items-center space-x-1.5 bg-slate-100 px-2.5 py-1 rounded-lg border border-slate-200 text-xs">
-          <Thermometer className="w-3.5 h-3.5 text-rose-500" />
+        <div className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-lg border text-xs transition-colors ${
+          ambientTempC === 150 
+            ? "bg-rose-50 border-rose-300 text-rose-800" 
+            : "bg-slate-100 border-slate-200 text-slate-800"
+        }`}>
+          <Thermometer className={`w-3.5 h-3.5 ${ambientTempC === 150 ? "text-rose-600 animate-pulse" : "text-rose-500"}`} />
           <span className="text-slate-500 font-medium">Ambient:</span>
           <select
             id="quick-ambient-temp"
             value={ambientTempC}
-            onChange={(e) => setAmbientTempC(Number(e.target.value))}
+            onChange={(e) => {
+              const val = Number(e.target.value);
+              setAmbientTempC(val);
+            }}
             className="font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer"
           >
             <option value={-20}>-20 °C (Arctic / Cold)</option>
@@ -102,7 +109,19 @@ export const Header: React.FC<HeaderProps> = ({
             <option value={25}>+25 °C (Standard Lab)</option>
             <option value={40}>+40 °C (Summer Hot)</option>
             <option value={60}>+60 °C (Industrial High)</option>
+            {battery.chemistry === "LITHIUM_THIONYL_CHLORIDE" ? (
+              <option value={150}>🔥 +150 °C (Downhole / Geothermal Li-SOCl2)</option>
+            ) : (
+              <option value={150} disabled>
+                +150 °C (Restricted: Li-SOCl2 Only)
+              </option>
+            )}
           </select>
+          {ambientTempC === 150 && (
+            <span className="hidden md:inline-block ml-1 px-1.5 py-0.5 rounded bg-rose-200 text-rose-900 font-bold text-[10px] uppercase tracking-wider">
+              150°C Downhole
+            </span>
+          )}
         </div>
       </div>
 

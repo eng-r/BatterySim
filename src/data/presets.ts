@@ -157,6 +157,32 @@ export const BATTERY_PRESETS: Record<string, BatterySpecification> = {
     self_discharge_annual_pct: 3.0,
     arrhenius_activation_energy_j_mol: 58000.0,
   },
+  lisocl2_downhole_hitemp_150c: {
+    id: "lisocl2_downhole_hitemp_150c",
+    name: "Tadiran TLH / Electrochem 150°C (Li-SOCl2 High-Temp D-Cell)",
+    chemistry: "LITHIUM_THIONYL_CHLORIDE",
+    nominal_voltage_v: 3.65,
+    nominal_capacity_mah: 13500.0,
+    reference_discharge_current_ma: 50.0,
+    cutoff_voltage_v: 2.0,
+    internal_resistance_ohm: 0.18, // Ultra-low impedance spiral structure for high-drain motors
+    r1_polarization_ohm: 0.12,
+    c1_polarization_f: 5.0,
+    r2_diffusion_ohm: 0.22,
+    c2_diffusion_f: 35.0,
+    peukert_coefficient: 1.04,
+    kibam_c_ratio: 0.90,
+    kibam_k_rate: 0.00045,
+    has_passivation: true,
+    initial_passivation_resistance_ohm: 0.45,
+    max_passivation_resistance_ohm: 3.0,
+    passivation_breakdown_rate: 0.55,
+    passivation_regrowth_rate: 0.00015,
+    reference_temperature_c: 25.0,
+    temp_resistance_coeff_pct: -0.7,
+    self_discharge_annual_pct: 2.2,
+    arrhenius_activation_energy_j_mol: 49000.0,
+  },
 };
 
 export const LOAD_PRESETS: Record<string, ElectricalLoadProfile> = {
@@ -277,6 +303,50 @@ export const LOAD_PRESETS: Record<string, ElectricalLoadProfile> = {
         load_type: "CONSTANT_CURRENT",
         value: 45.0,
         duration_s: 1.0,
+      },
+    ],
+  },
+  dc_motor_trapezoidal_actuation: {
+    profile_id: "dc_motor_trapezoidal_actuation",
+    name: "High-Torque DC Motor Actuator (Trapezoidal Waveform / 150°C)",
+    is_periodic: true,
+    repeat_count: -1,
+    max_simulation_time_s: 3.1536e8,
+    segments: [
+      {
+        segment_id: "m1_standby",
+        name: "Motor Driver Standby / Quiescent",
+        load_type: "CONSTANT_CURRENT",
+        value: 2.0, // 2 mA
+        duration_s: 60.0,
+      },
+      {
+        segment_id: "m2_accel",
+        name: "Trapezoid Accel / Inrush Surge (1.2A Peak)",
+        load_type: "CONSTANT_CURRENT",
+        value: 1200.0, // 1.2 A inrush
+        duration_s: 4.0,
+      },
+      {
+        segment_id: "m3_cruise",
+        name: "Continuous High-Torque Rotation (Trapezoid Plateau)",
+        load_type: "CONSTANT_CURRENT",
+        value: 650.0, // 650 mA cruise
+        duration_s: 45.0,
+      },
+      {
+        segment_id: "m4_decel",
+        name: "Controlled Deceleration / Dynamic Braking",
+        load_type: "CONSTANT_CURRENT",
+        value: 250.0, // 250 mA braking
+        duration_s: 6.0,
+      },
+      {
+        segment_id: "m5_cool",
+        name: "Post-Spin Thermal Dwell & Recovery",
+        load_type: "CONSTANT_CURRENT",
+        value: 5.0, // 5 mA cooldown
+        duration_s: 15.0,
       },
     ],
   },

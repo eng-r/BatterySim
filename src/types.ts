@@ -103,4 +103,4 @@ export interface SimulationReport {
   time_series: SimulationStepResult[];
 }
 
-export type ActiveTab = "battery" | "load" | "results" | "cli" | "sensitivity";
+export type ActiveTab = "battery" | "load" | "results" | "cli" | "sensitivity" | "motor";

@@ -22,9 +22,14 @@ export const SensitivityView: React.FC<SensitivityViewProps> = ({
 }) => {
   const [testTemp, setTestTemp] = useState<number>(25);
 
-  // Compute sensitivity data points across a temperature sweep (-20°C to +60°C)
+  // Compute sensitivity data points across a temperature sweep (-20°C to +60°C or +150°C for Li-SOCl2)
+  const isLiSocl2 = battery.chemistry === "LITHIUM_THIONYL_CHLORIDE";
+  const maxTempLimit = isLiSocl2 ? 150 : 60;
+
   const tempSweep = useMemo(() => {
-    const temps = [-20, -10, 0, 10, 20, 25, 30, 40, 50, 60];
+    const temps = isLiSocl2
+      ? [-20, 0, 25, 50, 75, 100, 125, 150]
+      : [-20, -10, 0, 10, 20, 25, 30, 40, 50, 60];
     return temps.map((t) => {
       const rep = runClientSimulation(battery, load, t, 50);
       return {
@@ -36,7 +41,7 @@ export const SensitivityView: React.FC<SensitivityViewProps> = ({
         cycles: rep.total_cycles_completed,
       };
     });
-  }, [battery, load]);
+  }, [battery, load, isLiSocl2]);
 
   // Active temperature simulation result
   const activeTempResult = useMemo(() => {
@@ -80,18 +85,22 @@ export const SensitivityView: React.FC<SensitivityViewProps> = ({
             id="slider-test-temp"
             type="range"
             min="-20"
-            max="60"
+            max={maxTempLimit}
             step="1"
             value={testTemp}
             onChange={(e) => setTestTemp(parseInt(e.target.value))}
             className="w-full accent-violet-600 cursor-pointer"
           />
           <div className="flex justify-between text-[11px] font-semibold text-slate-400 mt-1">
-            <span>-20 °C (Arctic / Freezing)</span>
+            <span>-20 °C (Arctic)</span>
             <span>0 °C</span>
-            <span>+25 °C (Nominal Lab)</span>
-            <span>+40 °C (Hot Desert)</span>
-            <span>+60 °C (Industrial Engine)</span>
+            <span>+25 °C (Nominal)</span>
+            <span>+60 °C (Industrial)</span>
+            {isLiSocl2 && (
+              <span className="text-rose-600 font-bold flex items-center space-x-1">
+                <span>🔥 +150 °C (Downhole)</span>
+              </span>
+            )}
           </div>
         </div>
 
