@@ -164,7 +164,7 @@ export const MotorSpinSimulator: React.FC<MotorSpinSimulatorProps> = ({
   const [consumedMah, setConsumedMah] = useState<number>(0);
   const [thermalLossMah, setThermalLossMah] = useState<number>(0);
   const [instantTerminalV, setInstantTerminalV] = useState<number>(battery.nominal_voltage_v);
-  const [lowestSagV, setLowestSagV] = useState<number>(battery.nominal_voltage_v);
+  const [lowestSagV, setLowestSagV] = useState<number | null>(null);
   const [history, setHistory] = useState<SpinHistoryPoint[]>([
     {
       spinIndex: 0,
@@ -210,20 +210,6 @@ export const MotorSpinSimulator: React.FC<MotorSpinSimulatorProps> = ({
     };
   }, [profile]);
 
-  // Remaining battery metrics
-  const totalDrawn = consumedMah + thermalLossMah;
-  const currentSocPct = Math.max(0, ((nominalCap - totalDrawn) / nominalCap) * 100);
-  const capacityFade = Math.max(0, (totalDrawn / nominalCap) * 100);
-  // SoH includes capacity loss plus accelerated thermal degradation factor
-  const thermalAgingFactor = localTempC > 100 ? 1.05 : 1.0;
-  const currentSohPct = Math.max(0, Math.min(100, 100 - capacityFade * thermalAgingFactor));
-  const isDepleted = currentSocPct <= 0.5 || instantTerminalV <= cutoffVoltageV;
-
-  // Estimated remaining spins before hitting cutoff
-  const remainingSpins = isDepleted
-    ? 0
-    : Math.max(0, Math.floor((nominalCap - totalDrawn) / profileMetrics.mahPerSpin));
-
   // Temperature multiplier & Arrhenius acceleration
   const tempThermalStats = useMemo(() => {
     const tRefK = battery.reference_temperature_c + 273.15;
@@ -234,24 +220,27 @@ export const MotorSpinSimulator: React.FC<MotorSpinSimulatorProps> = ({
       (1.0 / tCurK - 1.0 / tRefK);
     const arrheniusMult = Math.exp(Math.max(-10, Math.min(10, exponent)));
 
+    // Temperature resistance scaling (conductivity floor at high temps)
     const deltaT = battery.reference_temperature_c - localTempC;
     const tempMult = Math.max(
-      0.2,
+      0.18,
       1.0 + deltaT * (Math.abs(battery.temp_resistance_coeff_pct) / 100.0)
     );
-    const rTotal =
-      (battery.internal_resistance_ohm +
-        (battery.initial_passivation_resistance_ohm || 0.5)) *
-      tempMult;
+
+    // Dynamic high-temperature usable capacity derating (parasitic side reactions)
+    const tempDerateFactor =
+      localTempC > 25
+        ? Math.max(0.75, 1.0 - ((localTempC - 25) / 125) * 0.22)
+        : 1.0;
 
     return {
       arrheniusMult: Number(arrheniusMult.toFixed(1)),
       tempMult: Number(tempMult.toFixed(2)),
-      rTotal: Number(rTotal.toFixed(3)),
+      tempDerateFactor,
     };
   }, [battery, localTempC]);
 
-  // Electrochemical voltage calculation based on SoC and load current
+  // Electrochemical voltage calculation based on SoC, load current, and dynamic passivation breakdown
   const computeTerminalVoltage = (drawCurrentMa: number, socNormalized: number) => {
     const soc = Math.max(0, Math.min(1, socNormalized));
     const vNom = battery.nominal_voltage_v;
@@ -270,10 +259,61 @@ export const MotorSpinSimulator: React.FC<MotorSpinSimulatorProps> = ({
       ocv = vNom - 0.58 - 1.2 * Math.pow(ratio, 1.2);
     }
 
-    // Ohmic voltage drop under motor current
-    const vDrop = (drawCurrentMa / 1000.0) * tempThermalStats.rTotal;
-    return Math.max(0, ocv - vDrop);
+    // Passivation breakdown under active motor current:
+    // Heavy motor current (>50mA) breaks through the LiCl passivation layer within milliseconds
+    const isHeavyMotorDraw = drawCurrentMa > 50;
+    const activePassivationOhm = isHeavyMotorDraw
+      ? 0.04 // broken down under high motor torque
+      : (battery.initial_passivation_resistance_ohm || 0.5);
+
+    const rEffective = Math.max(
+      0.04,
+      (battery.internal_resistance_ohm + activePassivationOhm) * tempThermalStats.tempMult
+    );
+
+    // Ohmic & polarization voltage drop under load
+    const vDrop = (drawCurrentMa / 1000.0) * rEffective;
+
+    // Physical terminal voltage floor (polarization plateau before full depletion)
+    const minFloor = soc > 0.02 ? 1.0 : 0.0;
+    return Math.max(minFloor, ocv - vDrop);
   };
+
+  // Predicted initial inrush voltage
+  const predictedInrushV = useMemo(() => {
+    return computeTerminalVoltage(profile.accelCurrentMa, 1.0);
+  }, [profile.accelCurrentMa, battery, tempThermalStats]);
+
+  const displayLowestSagV = lowestSagV !== null ? lowestSagV : predictedInrushV;
+  const inrushDipV = Math.max(0, battery.nominal_voltage_v - displayLowestSagV);
+
+  // Remaining battery metrics & RUL accounting for thermal self-discharge & high-temperature derating
+  const totalDrawn = consumedMah + thermalLossMah;
+  const currentSocPct = Math.max(0, ((nominalCap - totalDrawn) / nominalCap) * 100);
+  const capacityFade = Math.max(0, (totalDrawn / nominalCap) * 100);
+  const thermalAgingFactor = localTempC > 100 ? 1.15 : 1.0;
+  const currentSohPct = Math.max(0, Math.min(100, 100 - capacityFade * thermalAgingFactor));
+
+  // Thermal self-discharge rate & effective consumption per spin cycle
+  const baseHourlySd =
+    (battery.nominal_capacity_mah * (battery.self_discharge_annual_pct / 100.0)) / 8760.0;
+  // Realistic operational tool interval (dwell period plus inter-actuation cooldown: ~15 mins scaled)
+  const operationalIntervalHours = Math.max(0.01, (profile.dwellDurationS + 900) / 3600.0);
+  const thermalMahPerCycle =
+    baseHourlySd * tempThermalStats.arrheniusMult * operationalIntervalHours;
+  const effectiveMahPerCycle = profileMetrics.mahPerSpin + thermalMahPerCycle;
+
+  // Usable capacity at current temperature
+  const usableNominalCap = nominalCap * tempThermalStats.tempDerateFactor;
+  const usableRemainingMah = Math.max(0, usableNominalCap - totalDrawn);
+
+  // Persistent depletion state (never flickers during transient inrush animation)
+  const isDepleted = usableRemainingMah <= 0 || currentSocPct <= 0.5;
+
+  // Estimated remaining spins before hitting cutoff (temperature derated)
+  const remainingSpins = isDepleted
+    ? 0
+    : Math.max(0, Math.floor(usableRemainingMah / effectiveMahPerCycle));
 
   // Perform single spin step calculation
   const applySingleSpinDegradation = () => {
@@ -318,7 +358,7 @@ export const MotorSpinSimulator: React.FC<MotorSpinSimulatorProps> = ({
       setConsumedMah(nextConsumed);
       setThermalLossMah(nextThermal);
       setInstantTerminalV(dwellV);
-      if (sagV < lowestSagV) setLowestSagV(sagV);
+      setLowestSagV((prev) => (prev === null ? sagV : Math.min(prev, sagV)));
 
       setHistory((prevHist) => [
         ...prevHist.slice(-40),
@@ -350,7 +390,7 @@ export const MotorSpinSimulator: React.FC<MotorSpinSimulatorProps> = ({
       currentSocPct / 100
     );
     setInstantTerminalV(sagV);
-    if (sagV < lowestSagV) setLowestSagV(sagV);
+    setLowestSagV((prev) => (prev === null ? sagV : Math.min(prev, sagV)));
     await new Promise((r) => setTimeout(r, 450));
 
     // 2. Cruise phase
@@ -419,7 +459,7 @@ export const MotorSpinSimulator: React.FC<MotorSpinSimulatorProps> = ({
     setConsumedMah(0);
     setThermalLossMah(0);
     setInstantTerminalV(battery.nominal_voltage_v);
-    setLowestSagV(battery.nominal_voltage_v);
+    setLowestSagV(null);
     setHistory([
       {
         spinIndex: 0,
@@ -547,29 +587,29 @@ export const MotorSpinSimulator: React.FC<MotorSpinSimulatorProps> = ({
         </div>
       )}
 
-      {/* NEW: TEMPERATURE & COMMUTATION PROFILE CONTROL CONSOLE */}
-      <div className="bg-slate-50/80 rounded-2xl border border-slate-200 p-5 space-y-5">
+      {/* 1. OPERATING TEMPERATURE CONTROL CONSOLE */}
+      <div className="bg-slate-50/80 rounded-2xl border border-slate-200 p-5 space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200/80 pb-3">
           <div className="flex items-center space-x-2">
-            <Sliders className="w-4 h-4 text-amber-600" />
+            <Thermometer className={`w-4 h-4 ${localTempC >= 100 ? "text-rose-600" : "text-amber-600"}`} />
             <span className="text-xs font-bold text-slate-800 uppercase tracking-wider">
-              Simulation Parameters & Commutation Profile Editor
+              Operating Temperature & Downhole Kinetics
             </span>
           </div>
 
           <div className="flex items-center space-x-2">
-            <button
-              id="btn-toggle-profile-editor"
-              onClick={() => setShowProfileEditor(!showProfileEditor)}
-              className="text-xs font-semibold text-slate-600 hover:text-slate-900 flex items-center space-x-1 cursor-pointer"
-            >
-              <Settings2 className="w-3.5 h-3.5" />
-              <span>{showProfileEditor ? "Hide Profile Editor" : "Edit Profile"}</span>
-            </button>
+            <span className="text-[10px] uppercase font-semibold text-slate-400">Thermal Factor:</span>
+            <span className={`text-xs font-mono font-bold px-2 py-0.5 rounded-md ${
+              tempThermalStats.arrheniusMult > 50
+                ? "bg-rose-100 text-rose-700"
+                : "bg-slate-200 text-slate-800"
+            }`}>
+              {tempThermalStats.arrheniusMult}× Arrhenius Rate
+            </span>
           </div>
         </div>
 
-        {/* 1. Operating Temperature Input Controls */}
+        {/* Operating Temperature Input Controls */}
         <div className="p-4 bg-white rounded-xl border border-slate-200 shadow-xs space-y-3">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="flex items-center space-x-2">
@@ -679,8 +719,335 @@ export const MotorSpinSimulator: React.FC<MotorSpinSimulatorProps> = ({
             </div>
           </div>
         </div>
+      </div>
 
-        {/* 2. Commutation Profile Editor (Duration and Values) */}
+      {/* Interactive Main Stage: Motor Graphics + Dynamic Trapezoidal Telemetry */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        {/* Left: Animated Physical DC Motor Visualizer (5 cols) */}
+        <div className="lg:col-span-5 p-5 bg-slate-900 rounded-2xl text-white flex flex-col justify-between relative overflow-hidden border border-slate-800">
+          {/* Subtle background electrical grid effect */}
+          <div className="absolute inset-0 bg-[radial-gradient(#334155_1px,transparent_1px)] [background-size:16px_16px] opacity-20 pointer-events-none" />
+
+          {/* Top Status & Tachometer */}
+          <div className="flex items-center justify-between z-10">
+            <div>
+              <span className="text-[11px] font-mono text-slate-400 uppercase tracking-wider">Actuator State</span>
+              <div className="flex items-center space-x-2 mt-0.5">
+                <span
+                  className={`w-2.5 h-2.5 rounded-full ${
+                    currentPhase === "accel"
+                      ? "bg-rose-500 animate-ping"
+                      : currentPhase === "cruise"
+                      ? "bg-amber-400 animate-pulse"
+                      : currentPhase === "decel"
+                      ? "bg-blue-400"
+                      : "bg-emerald-400"
+                  }`}
+                />
+                <span className="text-sm font-bold font-mono uppercase tracking-wide text-white">
+                  {currentPhase === "accel"
+                    ? "Inrush Acceleration"
+                    : currentPhase === "cruise"
+                    ? "High-Torque Cruise"
+                    : currentPhase === "decel"
+                    ? "Dynamic Braking"
+                    : "Standby Dwell"}
+                </span>
+              </div>
+            </div>
+
+            <div className="text-right">
+              <span className="text-[11px] font-mono text-slate-400 uppercase tracking-wider">Speed (RPM)</span>
+              <div className="text-xl font-bold font-mono text-amber-400">
+                {currentRpm.toLocaleString()} <span className="text-xs text-slate-400">RPM</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Center: Spinning DC Motor Rotor Graphic */}
+          <div className="my-6 flex flex-col items-center justify-center relative">
+            <div className="relative w-44 h-44 flex items-center justify-center">
+              {/* Outer Stator Casing with cooling fins */}
+              <svg className="absolute inset-0 w-full h-full text-slate-700" viewBox="0 0 160 160">
+                <circle cx="80" cy="80" r="72" fill="none" stroke="currentColor" strokeWidth="6" strokeDasharray="14 6" />
+                <circle cx="80" cy="80" r="62" fill="#0f172a" stroke="#334155" strokeWidth="2" />
+                {/* 4 Stator Pole Windings */}
+                <rect x="74" y="22" width="12" height="14" rx="3" fill="#b45309" />
+                <rect x="74" y="124" width="12" height="14" rx="3" fill="#b45309" />
+                <rect x="22" y="74" width="14" height="12" rx="3" fill="#b45309" />
+                <rect x="124" y="74" width="14" height="12" rx="3" fill="#b45309" />
+              </svg>
+
+              {/* Electromagnetic flux glow when active */}
+              {isSpinning && (
+                <div className="absolute inset-4 rounded-full bg-amber-500/20 blur-md animate-pulse pointer-events-none" />
+              )}
+
+              {/* Spinning Rotor / Armature Core */}
+              <div
+                className="w-24 h-24 rounded-full border-4 border-amber-500/80 bg-gradient-to-br from-slate-700 to-slate-800 shadow-lg flex items-center justify-center transition-transform"
+                style={{
+                  transform: `rotate(${isSpinning ? (currentPhase === "accel" ? 720 : 1800) : 0}deg)`,
+                  transitionDuration: isSpinning ? "1.5s" : "0.5s",
+                  transitionTimingFunction: currentPhase === "accel" ? "ease-in" : "linear",
+                }}
+              >
+                {/* 4-Blade Armature Graphic */}
+                <div className="relative w-full h-full flex items-center justify-center">
+                  <div className="absolute w-20 h-4 bg-amber-400/90 rounded-sm shadow-xs" />
+                  <div className="absolute w-4 h-20 bg-amber-400/90 rounded-sm shadow-xs" />
+                  <div className="w-8 h-8 rounded-full bg-slate-900 border-2 border-amber-300 z-10 flex items-center justify-center">
+                    <div className="w-2.5 h-2.5 rounded-full bg-amber-400" />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Live Current Draw Callout */}
+            <div className="mt-3 flex items-center space-x-2 bg-slate-800/80 border border-slate-700 px-3 py-1.5 rounded-xl text-xs font-mono">
+              <Zap className="w-3.5 h-3.5 text-amber-400" />
+              <span className="text-slate-300">Instant Draw:</span>
+              <span className="font-bold text-amber-400">{instantCurrentMa.toFixed(1)} mA</span>
+              <span className="text-slate-500">({(instantCurrentMa / 1000).toFixed(2)} A)</span>
+            </div>
+          </div>
+
+          {/* Bottom Telemetry Bar */}
+          <div className="grid grid-cols-2 gap-3 pt-3 border-t border-slate-800 text-xs font-mono z-10">
+            <div>
+              <span className="text-slate-400">Terminal Voltage:</span>
+              <p className="text-sm font-bold text-emerald-400 mt-0.5">
+                {instantTerminalV.toFixed(3)} V
+              </p>
+            </div>
+            <div className="text-right">
+              <span className="text-slate-400">Min Inrush Sag:</span>
+              <p className="text-sm font-bold text-rose-400 mt-0.5">
+                {displayLowestSagV.toFixed(3)} V
+              </p>
+              <span className="text-[10px] text-slate-400 font-sans block">
+                ({inrushDipV.toFixed(3)} V dip)
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* Right: Dynamic Trapezoidal Waveform Curve + Degradation Gauges (7 cols) */}
+        <div className="lg:col-span-7 flex flex-col justify-between space-y-6">
+          {/* Dynamic Trapezoidal Current Waveform SVG Diagram */}
+          <div className="bg-slate-50 rounded-2xl p-4 border border-slate-200">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center space-x-1.5">
+                <Activity className="w-3.5 h-3.5 text-amber-600" />
+                <span>Adjusted Trapezoidal Commutation Waveform</span>
+              </span>
+              <span className="text-[11px] font-mono text-slate-500">
+                Peak: {profile.accelCurrentMa} mA | Cruise: {profile.cruiseCurrentMa} mA | Total: {profileMetrics.totalDurationS}s
+              </span>
+            </div>
+
+            {/* Dynamic Vector Waveform Graphic */}
+            <div className="relative h-28 w-full bg-white rounded-xl border border-slate-200 p-2 overflow-hidden flex items-end">
+              <svg className="w-full h-full" viewBox="0 0 400 80" preserveAspectRatio="none">
+                {/* Horizontal grid lines */}
+                <line x1="0" y1="20" x2="400" y2="20" stroke="#f1f5f9" strokeWidth="1" />
+                <line x1="0" y1="45" x2="400" y2="45" stroke="#f1f5f9" strokeWidth="1" />
+                <line x1="0" y1="70" x2="400" y2="70" stroke="#f1f5f9" strokeWidth="1" />
+
+                {/* Calculate dynamic SVG coordinates based on user durations and currents */}
+                {(() => {
+                  const maxI = Math.max(100, profile.accelCurrentMa * 1.1);
+                  const totalT = Math.max(1, profileMetrics.totalDurationS);
+
+                  // Normalized x positions (total span 360, starting at x=20)
+                  const xStandby = 20 + (profile.standbyDurationS / totalT) * 70;
+                  const xAccel = xStandby + (profile.accelDurationS / totalT) * 110;
+                  const xCruise = xAccel + (profile.cruiseDurationS / totalT) * 120;
+                  const xDecel = xCruise + (profile.decelDurationS / totalT) * 40;
+                  const xDwell = 380;
+
+                  // Normalized y positions (0 is top y=10, 75 is bottom)
+                  const yStandby = 75 - (profile.standbyCurrentMa / maxI) * 65;
+                  const yAccel = 75 - (profile.accelCurrentMa / maxI) * 65;
+                  const yCruise = 75 - (profile.cruiseCurrentMa / maxI) * 65;
+                  const yDecel = 75 - (profile.decelCurrentMa / maxI) * 65;
+                  const yDwell = 75 - (profile.dwellCurrentMa / maxI) * 65;
+
+                  const polyPoints = `20,75 20,${yStandby} ${xStandby},${yStandby} ${xAccel},${yAccel} ${xCruise},${yCruise} ${xDecel},${yDecel} ${xDwell},${yDwell} ${xDwell},75`;
+                  const strokePoints = `20,${yStandby} ${xStandby},${yStandby} ${xAccel},${yAccel} ${xCruise},${yCruise} ${xDecel},${yDecel} ${xDwell},${yDwell}`;
+
+                  return (
+                    <>
+                      {/* Trapezoid Area Fill */}
+                      <polygon points={polyPoints} fill="rgba(245, 158, 11, 0.12)" />
+
+                      {/* Trapezoid Stroke Path */}
+                      <polyline
+                        points={strokePoints}
+                        fill="none"
+                        stroke="#d97706"
+                        strokeWidth="2.5"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+
+                      {/* Cursor marker showing current phase */}
+                      {currentPhase === "accel" && (
+                        <circle cx={xAccel} cy={yAccel} r="5" fill="#ef4444" className="animate-ping" />
+                      )}
+                      {currentPhase === "cruise" && (
+                        <circle cx={(xAccel + xCruise) / 2} cy={yCruise} r="5" fill="#f59e0b" className="animate-pulse" />
+                      )}
+                      {currentPhase === "decel" && (
+                        <circle cx={xDecel} cy={yDecel} r="5" fill="#3b82f6" />
+                      )}
+                      {currentPhase === "idle" && (
+                        <circle cx={25} cy={yStandby} r="4" fill="#10b981" />
+                      )}
+                    </>
+                  );
+                })()}
+              </svg>
+
+              {/* Labels below chart */}
+              <div className="absolute bottom-1 left-3 right-3 flex justify-between text-[9px] font-mono text-slate-400">
+                <span>Standby ({profile.standbyCurrentMa}mA)</span>
+                <span className="text-rose-600 font-bold">Accel ({profile.accelCurrentMa}mA)</span>
+                <span className="text-amber-600 font-bold">Cruise ({profile.cruiseCurrentMa}mA)</span>
+                <span className="text-blue-600">Brake ({profile.decelCurrentMa}mA)</span>
+                <span>Dwell</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Degradation Metrics Grid */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            {/* Metric 1: Completed Spins */}
+            <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200">
+              <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Actuations</span>
+              <p className="text-2xl font-extrabold text-slate-900 mt-0.5">
+                {completedSpins}
+              </p>
+              <span className="text-[10px] text-slate-500">spins completed</span>
+            </div>
+
+            {/* Metric 2: Remaining Spins (RUL) */}
+            <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Remaining Spins</span>
+                {localTempC > 40 && (
+                  <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-amber-100 text-amber-800">
+                    Derated
+                  </span>
+                )}
+              </div>
+              <p className={`text-2xl font-extrabold mt-0.5 ${remainingSpins < 50 ? "text-rose-600" : "text-indigo-600"}`}>
+                {remainingSpins.toLocaleString()}
+              </p>
+              <span className="text-[10px] text-slate-500 block">
+                {effectiveMahPerCycle.toFixed(1)} mAh/cyc (inc. Arrhenius)
+              </span>
+            </div>
+
+            {/* Metric 3: State of Charge (SoC) */}
+            <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200">
+              <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">State of Charge</span>
+              <p className="text-2xl font-extrabold text-slate-900 mt-0.5">
+                {currentSocPct.toFixed(1)}%
+              </p>
+              <div className="w-full bg-slate-200 h-1.5 rounded-full mt-1.5 overflow-hidden">
+                <div
+                  className={`h-full transition-all duration-300 ${
+                    currentSocPct > 40 ? "bg-emerald-500" : currentSocPct > 15 ? "bg-amber-500" : "bg-rose-500"
+                  }`}
+                  style={{ width: `${currentSocPct}%` }}
+                />
+              </div>
+            </div>
+
+            {/* Metric 4: State of Health (SoH) */}
+            <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200">
+              <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">State of Health</span>
+              <p className="text-2xl font-extrabold text-slate-900 mt-0.5">
+                {currentSohPct.toFixed(1)}%
+              </p>
+              <span className="text-[10px] text-slate-500">{localTempC}°C Thermal Factor</span>
+            </div>
+          </div>
+
+          {/* Gradual Multi-Spin Step Chart */}
+          <div className="p-4 bg-slate-50 rounded-xl border border-slate-200 space-y-2">
+            <div className="flex items-center justify-between text-xs">
+              <span className="font-bold text-slate-800 flex items-center space-x-1.5">
+                <TrendingDown className="w-4 h-4 text-violet-600" />
+                <span>Multi-Spin Degradation Stair-Step Curve (SoC % vs Spin Count)</span>
+              </span>
+              <span className="font-mono text-slate-500 text-[11px]">
+                Drawn: {totalDrawn.toFixed(1)} / {nominalCap} mAh
+              </span>
+            </div>
+
+            {/* Vector Step Chart */}
+            <div className="relative h-20 w-full bg-white rounded-lg border border-slate-200 p-1 flex items-end">
+              <svg className="w-full h-full" viewBox="0 0 300 60" preserveAspectRatio="none">
+                {history.length > 1 ? (
+                  <>
+                    {/* Background fill */}
+                    <polygon
+                      points={`0,60 ${history
+                        .map((p, idx) => {
+                          const x = (idx / (history.length - 1)) * 300;
+                          const y = 60 - (p.socPct / 100) * 55;
+                          return `${x},${y}`;
+                        })
+                        .join(" ")} 300,60`}
+                      fill="rgba(124, 58, 237, 0.08)"
+                    />
+                    {/* Line */}
+                    <polyline
+                      points={history
+                        .map((p, idx) => {
+                          const x = (idx / (history.length - 1)) * 300;
+                          const y = 60 - (p.socPct / 100) * 55;
+                          return `${x},${y}`;
+                        })
+                        .join(" ")}
+                      fill="none"
+                      stroke="#7c3aed"
+                      strokeWidth="2"
+                    />
+                  </>
+                ) : (
+                  <line x1="0" y1="5" x2="300" y2="5" stroke="#7c3aed" strokeWidth="2" />
+                )}
+              </svg>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* 3. COMMUTATION PROFILE EDITOR (Duration and Values) */}
+      <div className="bg-slate-50/80 rounded-2xl border border-slate-200 p-5 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200/80 pb-3">
+          <div className="flex items-center space-x-2">
+            <Sliders className="w-4 h-4 text-amber-600" />
+            <span className="text-xs font-bold text-slate-800 uppercase tracking-wider">
+              Adjust Commutation Waveform Values & Durations:
+            </span>
+          </div>
+
+          <div className="flex items-center space-x-2">
+            <button
+              id="btn-toggle-profile-editor"
+              onClick={() => setShowProfileEditor(!showProfileEditor)}
+              className="text-xs font-semibold text-slate-600 hover:text-slate-900 flex items-center space-x-1 cursor-pointer"
+            >
+              <Settings2 className="w-3.5 h-3.5" />
+              <span>{showProfileEditor ? "Hide Profile Editor" : "Edit Profile"}</span>
+            </button>
+          </div>
+        </div>
+
         {showProfileEditor && (
           <div className="space-y-4">
             {/* Presets and Quick Actions */}
@@ -940,299 +1307,6 @@ export const MotorSpinSimulator: React.FC<MotorSpinSimulatorProps> = ({
             </div>
           </div>
         )}
-      </div>
-
-      {/* Interactive Main Stage: Motor Graphics + Dynamic Trapezoidal Telemetry */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left: Animated Physical DC Motor Visualizer (5 cols) */}
-        <div className="lg:col-span-5 p-5 bg-slate-900 rounded-2xl text-white flex flex-col justify-between relative overflow-hidden border border-slate-800">
-          {/* Subtle background electrical grid effect */}
-          <div className="absolute inset-0 bg-[radial-gradient(#334155_1px,transparent_1px)] [background-size:16px_16px] opacity-20 pointer-events-none" />
-
-          {/* Top Status & Tachometer */}
-          <div className="flex items-center justify-between z-10">
-            <div>
-              <span className="text-[11px] font-mono text-slate-400 uppercase tracking-wider">Actuator State</span>
-              <div className="flex items-center space-x-2 mt-0.5">
-                <span
-                  className={`w-2.5 h-2.5 rounded-full ${
-                    currentPhase === "accel"
-                      ? "bg-rose-500 animate-ping"
-                      : currentPhase === "cruise"
-                      ? "bg-amber-400 animate-pulse"
-                      : currentPhase === "decel"
-                      ? "bg-blue-400"
-                      : "bg-emerald-400"
-                  }`}
-                />
-                <span className="text-sm font-bold font-mono uppercase tracking-wide text-white">
-                  {currentPhase === "accel"
-                    ? "Inrush Acceleration"
-                    : currentPhase === "cruise"
-                    ? "High-Torque Cruise"
-                    : currentPhase === "decel"
-                    ? "Dynamic Braking"
-                    : "Standby Dwell"}
-                </span>
-              </div>
-            </div>
-
-            <div className="text-right">
-              <span className="text-[11px] font-mono text-slate-400 uppercase tracking-wider">Speed (RPM)</span>
-              <div className="text-xl font-bold font-mono text-amber-400">
-                {currentRpm.toLocaleString()} <span className="text-xs text-slate-400">RPM</span>
-              </div>
-            </div>
-          </div>
-
-          {/* Center: Spinning DC Motor Rotor Graphic */}
-          <div className="my-6 flex flex-col items-center justify-center relative">
-            <div className="relative w-44 h-44 flex items-center justify-center">
-              {/* Outer Stator Casing with cooling fins */}
-              <svg className="absolute inset-0 w-full h-full text-slate-700" viewBox="0 0 160 160">
-                <circle cx="80" cy="80" r="72" fill="none" stroke="currentColor" strokeWidth="6" strokeDasharray="14 6" />
-                <circle cx="80" cy="80" r="62" fill="#0f172a" stroke="#334155" strokeWidth="2" />
-                {/* 4 Stator Pole Windings */}
-                <rect x="74" y="22" width="12" height="14" rx="3" fill="#b45309" />
-                <rect x="74" y="124" width="12" height="14" rx="3" fill="#b45309" />
-                <rect x="22" y="74" width="14" height="12" rx="3" fill="#b45309" />
-                <rect x="124" y="74" width="14" height="12" rx="3" fill="#b45309" />
-              </svg>
-
-              {/* Electromagnetic flux glow when active */}
-              {isSpinning && (
-                <div className="absolute inset-4 rounded-full bg-amber-500/20 blur-md animate-pulse pointer-events-none" />
-              )}
-
-              {/* Spinning Rotor / Armature Core */}
-              <div
-                className="w-24 h-24 rounded-full border-4 border-amber-500/80 bg-gradient-to-br from-slate-700 to-slate-800 shadow-lg flex items-center justify-center transition-transform"
-                style={{
-                  transform: `rotate(${isSpinning ? (currentPhase === "accel" ? 720 : 1800) : 0}deg)`,
-                  transitionDuration: isSpinning ? "1.5s" : "0.5s",
-                  transitionTimingFunction: currentPhase === "accel" ? "ease-in" : "linear",
-                }}
-              >
-                {/* 4-Blade Armature Graphic */}
-                <div className="relative w-full h-full flex items-center justify-center">
-                  <div className="absolute w-20 h-4 bg-amber-400/90 rounded-sm shadow-xs" />
-                  <div className="absolute w-4 h-20 bg-amber-400/90 rounded-sm shadow-xs" />
-                  <div className="w-8 h-8 rounded-full bg-slate-900 border-2 border-amber-300 z-10 flex items-center justify-center">
-                    <div className="w-2.5 h-2.5 rounded-full bg-amber-400" />
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Live Current Draw Callout */}
-            <div className="mt-3 flex items-center space-x-2 bg-slate-800/80 border border-slate-700 px-3 py-1.5 rounded-xl text-xs font-mono">
-              <Zap className="w-3.5 h-3.5 text-amber-400" />
-              <span className="text-slate-300">Instant Draw:</span>
-              <span className="font-bold text-amber-400">{instantCurrentMa.toFixed(1)} mA</span>
-              <span className="text-slate-500">({(instantCurrentMa / 1000).toFixed(2)} A)</span>
-            </div>
-          </div>
-
-          {/* Bottom Telemetry Bar */}
-          <div className="grid grid-cols-2 gap-3 pt-3 border-t border-slate-800 text-xs font-mono z-10">
-            <div>
-              <span className="text-slate-400">Terminal Voltage:</span>
-              <p className="text-sm font-bold text-emerald-400 mt-0.5">
-                {instantTerminalV.toFixed(3)} V
-              </p>
-            </div>
-            <div className="text-right">
-              <span className="text-slate-400">Min Inrush Sag:</span>
-              <p className="text-sm font-bold text-rose-400 mt-0.5">
-                {lowestSagV.toFixed(3)} V
-              </p>
-            </div>
-          </div>
-        </div>
-
-        {/* Right: Dynamic Trapezoidal Waveform Curve + Degradation Gauges (7 cols) */}
-        <div className="lg:col-span-7 flex flex-col justify-between space-y-6">
-          {/* Dynamic Trapezoidal Current Waveform SVG Diagram */}
-          <div className="bg-slate-50 rounded-2xl p-4 border border-slate-200">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center space-x-1.5">
-                <Activity className="w-3.5 h-3.5 text-amber-600" />
-                <span>Adjusted Trapezoidal Commutation Waveform</span>
-              </span>
-              <span className="text-[11px] font-mono text-slate-500">
-                Peak: {profile.accelCurrentMa} mA | Cruise: {profile.cruiseCurrentMa} mA | Total: {profileMetrics.totalDurationS}s
-              </span>
-            </div>
-
-            {/* Dynamic Vector Waveform Graphic */}
-            <div className="relative h-28 w-full bg-white rounded-xl border border-slate-200 p-2 overflow-hidden flex items-end">
-              <svg className="w-full h-full" viewBox="0 0 400 80" preserveAspectRatio="none">
-                {/* Horizontal grid lines */}
-                <line x1="0" y1="20" x2="400" y2="20" stroke="#f1f5f9" strokeWidth="1" />
-                <line x1="0" y1="45" x2="400" y2="45" stroke="#f1f5f9" strokeWidth="1" />
-                <line x1="0" y1="70" x2="400" y2="70" stroke="#f1f5f9" strokeWidth="1" />
-
-                {/* Calculate dynamic SVG coordinates based on user durations and currents */}
-                {(() => {
-                  const maxI = Math.max(100, profile.accelCurrentMa * 1.1);
-                  const totalT = Math.max(1, profileMetrics.totalDurationS);
-
-                  // Normalized x positions (total span 360, starting at x=20)
-                  const xStandby = 20 + (profile.standbyDurationS / totalT) * 70;
-                  const xAccel = xStandby + (profile.accelDurationS / totalT) * 110;
-                  const xCruise = xAccel + (profile.cruiseDurationS / totalT) * 120;
-                  const xDecel = xCruise + (profile.decelDurationS / totalT) * 40;
-                  const xDwell = 380;
-
-                  // Normalized y positions (0 is top y=10, 75 is bottom)
-                  const yStandby = 75 - (profile.standbyCurrentMa / maxI) * 65;
-                  const yAccel = 75 - (profile.accelCurrentMa / maxI) * 65;
-                  const yCruise = 75 - (profile.cruiseCurrentMa / maxI) * 65;
-                  const yDecel = 75 - (profile.decelCurrentMa / maxI) * 65;
-                  const yDwell = 75 - (profile.dwellCurrentMa / maxI) * 65;
-
-                  const polyPoints = `20,75 20,${yStandby} ${xStandby},${yStandby} ${xAccel},${yAccel} ${xCruise},${yCruise} ${xDecel},${yDecel} ${xDwell},${yDwell} ${xDwell},75`;
-                  const strokePoints = `20,${yStandby} ${xStandby},${yStandby} ${xAccel},${yAccel} ${xCruise},${yCruise} ${xDecel},${yDecel} ${xDwell},${yDwell}`;
-
-                  return (
-                    <>
-                      {/* Trapezoid Area Fill */}
-                      <polygon points={polyPoints} fill="rgba(245, 158, 11, 0.12)" />
-
-                      {/* Trapezoid Stroke Path */}
-                      <polyline
-                        points={strokePoints}
-                        fill="none"
-                        stroke="#d97706"
-                        strokeWidth="2.5"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-
-                      {/* Cursor marker showing current phase */}
-                      {currentPhase === "accel" && (
-                        <circle cx={xAccel} cy={yAccel} r="5" fill="#ef4444" className="animate-ping" />
-                      )}
-                      {currentPhase === "cruise" && (
-                        <circle cx={(xAccel + xCruise) / 2} cy={yCruise} r="5" fill="#f59e0b" className="animate-pulse" />
-                      )}
-                      {currentPhase === "decel" && (
-                        <circle cx={xDecel} cy={yDecel} r="5" fill="#3b82f6" />
-                      )}
-                      {currentPhase === "idle" && (
-                        <circle cx={25} cy={yStandby} r="4" fill="#10b981" />
-                      )}
-                    </>
-                  );
-                })()}
-              </svg>
-
-              {/* Labels below chart */}
-              <div className="absolute bottom-1 left-3 right-3 flex justify-between text-[9px] font-mono text-slate-400">
-                <span>Standby ({profile.standbyCurrentMa}mA)</span>
-                <span className="text-rose-600 font-bold">Accel ({profile.accelCurrentMa}mA)</span>
-                <span className="text-amber-600 font-bold">Cruise ({profile.cruiseCurrentMa}mA)</span>
-                <span className="text-blue-600">Brake ({profile.decelCurrentMa}mA)</span>
-                <span>Dwell</span>
-              </div>
-            </div>
-          </div>
-
-          {/* Degradation Metrics Grid */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            {/* Metric 1: Completed Spins */}
-            <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200">
-              <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Actuations</span>
-              <p className="text-2xl font-extrabold text-slate-900 mt-0.5">
-                {completedSpins}
-              </p>
-              <span className="text-[10px] text-slate-500">spins completed</span>
-            </div>
-
-            {/* Metric 2: Remaining Spins (RUL) */}
-            <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200">
-              <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Remaining Spins</span>
-              <p className={`text-2xl font-extrabold mt-0.5 ${remainingSpins < 50 ? "text-rose-600" : "text-indigo-600"}`}>
-                {remainingSpins.toLocaleString()}
-              </p>
-              <span className="text-[10px] text-slate-500">RUL to 2.0V cutoff</span>
-            </div>
-
-            {/* Metric 3: State of Charge (SoC) */}
-            <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200">
-              <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">State of Charge</span>
-              <p className="text-2xl font-extrabold text-slate-900 mt-0.5">
-                {currentSocPct.toFixed(1)}%
-              </p>
-              <div className="w-full bg-slate-200 h-1.5 rounded-full mt-1.5 overflow-hidden">
-                <div
-                  className={`h-full transition-all duration-300 ${
-                    currentSocPct > 40 ? "bg-emerald-500" : currentSocPct > 15 ? "bg-amber-500" : "bg-rose-500"
-                  }`}
-                  style={{ width: `${currentSocPct}%` }}
-                />
-              </div>
-            </div>
-
-            {/* Metric 4: State of Health (SoH) */}
-            <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200">
-              <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">State of Health</span>
-              <p className="text-2xl font-extrabold text-slate-900 mt-0.5">
-                {currentSohPct.toFixed(1)}%
-              </p>
-              <span className="text-[10px] text-slate-500">{localTempC}°C Thermal Factor</span>
-            </div>
-          </div>
-
-          {/* Gradual Multi-Spin Step Chart */}
-          <div className="p-4 bg-slate-50 rounded-xl border border-slate-200 space-y-2">
-            <div className="flex items-center justify-between text-xs">
-              <span className="font-bold text-slate-800 flex items-center space-x-1.5">
-                <TrendingDown className="w-4 h-4 text-violet-600" />
-                <span>Multi-Spin Degradation Stair-Step Curve (SoC % vs Spin Count)</span>
-              </span>
-              <span className="font-mono text-slate-500 text-[11px]">
-                Drawn: {totalDrawn.toFixed(1)} / {nominalCap} mAh
-              </span>
-            </div>
-
-            {/* Vector Step Chart */}
-            <div className="relative h-20 w-full bg-white rounded-lg border border-slate-200 p-1 flex items-end">
-              <svg className="w-full h-full" viewBox="0 0 300 60" preserveAspectRatio="none">
-                {history.length > 1 ? (
-                  <>
-                    {/* Background fill */}
-                    <polygon
-                      points={`0,60 ${history
-                        .map((p, idx) => {
-                          const x = (idx / (history.length - 1)) * 300;
-                          const y = 60 - (p.socPct / 100) * 55;
-                          return `${x},${y}`;
-                        })
-                        .join(" ")} 300,60`}
-                      fill="rgba(124, 58, 237, 0.08)"
-                    />
-                    {/* Line */}
-                    <polyline
-                      points={history
-                        .map((p, idx) => {
-                          const x = (idx / (history.length - 1)) * 300;
-                          const y = 60 - (p.socPct / 100) * 55;
-                          return `${x},${y}`;
-                        })
-                        .join(" ")}
-                      fill="none"
-                      stroke="#7c3aed"
-                      strokeWidth="2"
-                    />
-                  </>
-                ) : (
-                  <line x1="0" y1="5" x2="300" y2="5" stroke="#7c3aed" strokeWidth="2" />
-                )}
-              </svg>
-            </div>
-          </div>
-        </div>
       </div>
     </div>
   );
