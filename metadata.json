@@ -1,0 +1,6 @@
+{
+  "name": "BatteryRUL Simulator",
+  "description": "Primary battery modeling simulator calculating SoC, SoH, and RUL under dynamic electrical load profiles.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

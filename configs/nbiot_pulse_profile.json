@@ -1,0 +1,37 @@
+{
+  "profile_id": "nbiot_asset_tracker",
+  "name": "NB-IoT Asset Tracker (Hourly Periodic TX)",
+  "is_periodic": true,
+  "repeat_count": -1,
+  "max_simulation_time_s": 315360000,
+  "segments": [
+    {
+      "segment_id": "s1",
+      "name": "Deep Sleep PSM",
+      "load_type": "CONSTANT_CURRENT",
+      "value": 0.0035,
+      "duration_s": 3595.0
+    },
+    {
+      "segment_id": "s2",
+      "name": "GPS Cold Fix",
+      "load_type": "CONSTANT_CURRENT",
+      "value": 25.0,
+      "duration_s": 2.5
+    },
+    {
+      "segment_id": "s3",
+      "name": "NB-IoT Transmit +23dBm",
+      "load_type": "CONSTANT_CURRENT",
+      "value": 75.0,
+      "duration_s": 1.5
+    },
+    {
+      "segment_id": "s4",
+      "name": "NB-IoT Receive Window",
+      "load_type": "CONSTANT_CURRENT",
+      "value": 25.0,
+      "duration_s": 1.0
+    }
+  ]
+}
